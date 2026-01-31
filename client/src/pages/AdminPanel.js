@@ -15,13 +15,13 @@ const AdminPanel = () => {
   }, []);
 
   const loadNumbers = async () => {
-    const res = await axios.get('http://localhost:5000/api/admin/numbers');
+    const res = await axios.get('/api/admin/numbers');
     setNumbers(res.data);
   };
 
   const addNumber = async (e) => {
     e.preventDefault();
-    await axios.post('http://localhost:5000/api/admin/numbers', form);
+    await axios.post('/api/admin/numbers', form);
     setForm({ number: '', country: '', countryCode: '', price: '', service: 'whatsapp' });
     loadNumbers();
   };
@@ -29,7 +29,7 @@ const AdminPanel = () => {
   const searchTwilioNumbers = async () => {
     setLoading(true);
     try {
-      const res = await axios.get(`http://localhost:5000/api/twilio/search-numbers?countryCode=${searchCountry}`);
+      const res = await axios.get(`/api/twilio/search-numbers?countryCode=${searchCountry}`);
       setTwilioNumbers(res.data);
     } catch (error) {
       alert(error.response?.data?.message || 'Erro ao buscar números');
@@ -40,7 +40,7 @@ const AdminPanel = () => {
   const loadOwnedNumbers = async () => {
     setLoading(true);
     try {
-      const res = await axios.get('http://localhost:5000/api/twilio/owned-numbers');
+      const res = await axios.get('/api/twilio/owned-numbers');
       setOwnedNumbers(res.data);
     } catch (error) {
       alert(error.response?.data?.message || 'Erro ao buscar números');
@@ -53,7 +53,7 @@ const AdminPanel = () => {
     
     setLoading(true);
     try {
-      await axios.post('http://localhost:5000/api/twilio/buy-number', {
+      await axios.post('/api/twilio/buy-number', {
         phoneNumber,
         country: searchCountry === 'US' ? 'USA' : 'Brasil',
         countryCode: searchCountry === 'US' ? '1' : '55',

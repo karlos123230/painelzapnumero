@@ -12,18 +12,18 @@ const Dashboard = () => {
   }, [selectedCountry]);
 
   const loadNumbers = async () => {
-    const res = await axios.get(`http://localhost:5000/api/numbers/available?country=${selectedCountry}`);
+    const res = await axios.get(`/api/numbers/available?country=${selectedCountry}`);
     setNumbers(res.data);
   };
 
   const loadOrders = async () => {
-    const res = await axios.get('http://localhost:5000/api/orders/my-orders');
+    const res = await axios.get('/api/orders/my-orders');
     setOrders(res.data);
   };
 
   const rentNumber = async (id) => {
     try {
-      await axios.post(`http://localhost:5000/api/numbers/rent/${id}`);
+      await axios.post(`/api/numbers/rent/${id}`);
       loadNumbers();
       loadOrders();
     } catch (err) {
