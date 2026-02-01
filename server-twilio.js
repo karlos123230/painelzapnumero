@@ -2,9 +2,13 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 require('dotenv').config();
 
 const twilioService = require('./services/twilioService');
+const User = require('./models/User');
+const PhoneNumber = require('./models/PhoneNumber');
+const Order = require('./models/Order');
 
 const app = express();
 app.use(cors({
@@ -14,19 +18,19 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Para webhooks do Twilio
 
-// Banco de dados em memória
-const users = [];
-const numbers = []; // Vazio - números serão comprados do Twilio
-const orders = [];
+// Conectar ao MongoDB
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅ MongoDB conectado'))
+  .catch(err => console.error('❌ Erro ao conectar MongoDB:', err));
 
 // Middleware de autenticação
-const auth = (req, res, next) => {
+const auth = async (req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ message: 'Não autorizado' });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret_key_temp');
-    req.user = users.find(u => u.id === decoded.userId);
+    req.user = await User.findById(decoded.userId);
     if (!req.user) return res.status(401).json({ message: 'Usuário não encontrado' });
     next();
   } catch (error) {
@@ -48,28 +52,31 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    const existingUser = users.find(u => u.email === email);
+    const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ message: 'Email já cadastrado' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = {
-      id: String(users.length + 1),
+    
+    // Primeiro usuário é admin
+    const userCount = await User.countDocuments();
+    const user = new User({
       email,
       password: hashedPassword,
       balance: 100,
-      isAdmin: users.length === 0
-    };
+      isAdmin: userCount === 0
+    });
     
-    users.push(user);
+    await user.save();
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'secret_key_temp');
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'secret_key_temp');
     res.json({ 
       token, 
-      user: { id: user.id, email: user.email, balance: user.balance, isAdmin: user.isAdmin } 
+      user: { id: user._id, email: user.email, balance: user.balance, isAdmin: user.isAdmin } 
     });
   } catch (error) {
+    console.error('Erro ao registrar:', error);
     res.status(500).json({ message: 'Erro ao registrar usuário' });
   }
 });
@@ -78,7 +85,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    const user = users.find(u => u.email === email);
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(400).json({ message: 'Credenciais inválidas' });
     }
@@ -88,155 +95,245 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Credenciais inválidas' });
     }
 
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'secret_key_temp');
+    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET || 'secret_key_temp');
     res.json({ 
       token, 
-      user: { id: user.id, email: user.email, balance: user.balance, isAdmin: user.isAdmin } 
+      user: { id: user._id, email: user.email, balance: user.balance, isAdmin: user.isAdmin } 
     });
   } catch (error) {
+    console.error('Erro ao fazer login:', error);
     res.status(500).json({ message: 'Erro ao fazer login' });
   }
 });
 
 // ============= ROTAS DE NÚMEROS =============
 
-app.get('/api/numbers/available', (req, res) => {
-  const { country } = req.query;
-  let available = numbers.filter(n => n.status === 'available');
-  
-  if (country) {
-    available = available.filter(n => n.country === country);
+app.get('/api/numbers/available', async (req, res) => {
+  try {
+    const { country } = req.query;
+    let query = { status: 'available' };
+    
+    if (country) {
+      query.country = country;
+    }
+    
+    const available = await PhoneNumber.find(query);
+    res.json(available);
+  } catch (error) {
+    console.error('Erro ao buscar números:', error);
+    res.status(500).json({ message: 'Erro ao buscar números' });
   }
-  
-  res.json(available);
 });
 
-app.post('/api/numbers/rent/:id', auth, (req, res) => {
-  const number = numbers.find(n => n.id === req.params.id);
+app.post('/api/numbers/rent/:id', auth, async (req, res) => {
+  try {
+    const number = await PhoneNumber.findById(req.params.id);
 
-  if (!number || number.status !== 'available') {
-    return res.status(400).json({ message: 'Número não disponível' });
+    if (!number || number.status !== 'available') {
+      return res.status(400).json({ message: 'Número não disponível' });
+    }
+
+    if (req.user.balance < number.price) {
+      return res.status(400).json({ message: 'Saldo insuficiente' });
+    }
+
+    req.user.balance -= number.price;
+    await req.user.save();
+
+    number.status = 'rented';
+    number.currentUser = req.user._id;
+    number.rentedUntil = new Date(Date.now() + 20 * 60 * 1000); // 20 minutos
+    await number.save();
+
+    const order = new Order({
+      user: req.user._id,
+      phoneNumber: number._id,
+      service: number.service,
+      price: number.price,
+      status: 'active',
+      expiresAt: number.rentedUntil
+    });
+    await order.save();
+
+    res.json({ 
+      order: {
+        id: order._id,
+        userId: order.user,
+        numberId: order.phoneNumber,
+        number: number.number,
+        price: order.price,
+        status: order.status,
+        verificationCode: order.verificationCode,
+        messages: order.messages,
+        createdAt: order.createdAt,
+        expiresAt: order.expiresAt
+      }, 
+      number 
+    });
+  } catch (error) {
+    console.error('Erro ao alugar número:', error);
+    res.status(500).json({ message: 'Erro ao alugar número' });
   }
-
-  if (req.user.balance < number.price) {
-    return res.status(400).json({ message: 'Saldo insuficiente' });
-  }
-
-  req.user.balance -= number.price;
-  number.status = 'rented';
-  number.rentedBy = req.user.id;
-  number.rentedUntil = new Date(Date.now() + 20 * 60 * 1000); // 20 minutos
-
-  const order = {
-    id: String(orders.length + 1),
-    userId: req.user.id,
-    numberId: number.id,
-    number: number.number,
-    price: number.price,
-    status: 'active',
-    verificationCode: null,
-    messages: [],
-    createdAt: new Date(),
-    expiresAt: number.rentedUntil
-  };
-  orders.push(order);
-
-  res.json({ order, number });
 });
 
-app.get('/api/numbers/code/:orderId', auth, (req, res) => {
-  const order = orders.find(o => o.id === req.params.orderId && o.userId === req.user.id);
-  
-  if (!order) {
-    return res.status(404).json({ message: 'Pedido não encontrado' });
-  }
+app.get('/api/numbers/code/:orderId', auth, async (req, res) => {
+  try {
+    const order = await Order.findOne({ 
+      _id: req.params.orderId, 
+      user: req.user._id 
+    });
+    
+    if (!order) {
+      return res.status(404).json({ message: 'Pedido não encontrado' });
+    }
 
-  res.json({
-    verificationCode: order.verificationCode,
-    messages: order.messages,
-    status: order.status
-  });
+    res.json({
+      verificationCode: order.verificationCode,
+      messages: order.messages,
+      status: order.status
+    });
+  } catch (error) {
+    console.error('Erro ao buscar código:', error);
+    res.status(500).json({ message: 'Erro ao buscar código' });
+  }
 });
 
 // ============= ROTAS DE PEDIDOS =============
 
-app.get('/api/orders/my-orders', auth, (req, res) => {
-  const userOrders = orders.filter(o => o.userId === req.user.id);
-  res.json(userOrders);
+app.get('/api/orders/my-orders', auth, async (req, res) => {
+  try {
+    const userOrders = await Order.find({ user: req.user._id })
+      .populate('phoneNumber')
+      .sort({ createdAt: -1 });
+    
+    // Formatar resposta para compatibilidade com frontend
+    const formattedOrders = userOrders.map(order => ({
+      id: order._id,
+      userId: order.user,
+      numberId: order.phoneNumber?._id,
+      number: order.phoneNumber?.number,
+      price: order.price,
+      status: order.status,
+      verificationCode: order.verificationCode,
+      messages: order.messages,
+      createdAt: order.createdAt,
+      expiresAt: order.expiresAt
+    }));
+    
+    res.json(formattedOrders);
+  } catch (error) {
+    console.error('Erro ao buscar pedidos:', error);
+    res.status(500).json({ message: 'Erro ao buscar pedidos' });
+  }
 });
 
-app.post('/api/orders/cancel/:id', auth, (req, res) => {
-  const order = orders.find(o => o.id === req.params.id && o.userId === req.user.id);
-  
-  if (!order) {
-    return res.status(404).json({ message: 'Pedido não encontrado' });
-  }
+app.post('/api/orders/cancel/:id', auth, async (req, res) => {
+  try {
+    const order = await Order.findOne({ 
+      _id: req.params.id, 
+      user: req.user._id 
+    });
+    
+    if (!order) {
+      return res.status(404).json({ message: 'Pedido não encontrado' });
+    }
 
-  if (order.status === 'completed') {
-    return res.status(400).json({ message: 'Pedido já completado' });
-  }
+    if (order.status === 'completed') {
+      return res.status(400).json({ message: 'Pedido já completado' });
+    }
 
-  order.status = 'cancelled';
-  
-  const number = numbers.find(n => n.id === order.numberId);
-  if (number) {
-    number.status = 'available';
-    number.rentedBy = null;
-  }
+    order.status = 'cancelled';
+    await order.save();
+    
+    const number = await PhoneNumber.findById(order.phoneNumber);
+    if (number) {
+      number.status = 'available';
+      number.currentUser = null;
+      number.rentedUntil = null;
+      await number.save();
+    }
 
-  res.json({ message: 'Pedido cancelado' });
+    res.json({ message: 'Pedido cancelado' });
+  } catch (error) {
+    console.error('Erro ao cancelar pedido:', error);
+    res.status(500).json({ message: 'Erro ao cancelar pedido' });
+  }
 });
 
 // ============= ROTAS ADMIN =============
 
-app.get('/api/admin/numbers', [auth, adminAuth], (req, res) => {
-  res.json(numbers);
-});
-
-app.post('/api/admin/numbers', [auth, adminAuth], (req, res) => {
-  const { number, country, countryCode, price, service } = req.body;
-  
-  const newNumber = {
-    id: String(numbers.length + 1),
-    number,
-    country,
-    countryCode,
-    price: parseFloat(price),
-    service: service || 'whatsapp',
-    status: 'available',
-    twilioSid: null
-  };
-  
-  numbers.push(newNumber);
-  res.json(newNumber);
-});
-
-app.post('/api/admin/send-code/:orderId', [auth, adminAuth], (req, res) => {
-  const { code, message } = req.body;
-  const order = orders.find(o => o.id === req.params.orderId);
-  
-  if (!order) {
-    return res.status(404).json({ message: 'Pedido não encontrado' });
+app.get('/api/admin/numbers', [auth, adminAuth], async (req, res) => {
+  try {
+    const allNumbers = await PhoneNumber.find().sort({ createdAt: -1 });
+    res.json(allNumbers);
+  } catch (error) {
+    console.error('Erro ao buscar números:', error);
+    res.status(500).json({ message: 'Erro ao buscar números' });
   }
-
-  order.verificationCode = code;
-  order.messages.push({ text: message, receivedAt: new Date() });
-  order.status = 'completed';
-
-  res.json({ message: 'Código enviado com sucesso' });
 });
 
-app.get('/api/admin/stats', [auth, adminAuth], (req, res) => {
-  const totalRevenue = orders
-    .filter(o => o.status === 'completed')
-    .reduce((sum, o) => sum + o.price, 0);
+app.post('/api/admin/numbers', [auth, adminAuth], async (req, res) => {
+  try {
+    const { number, country, countryCode, price, service, twilioSid } = req.body;
+    
+    const newNumber = new PhoneNumber({
+      number,
+      country,
+      countryCode,
+      price: parseFloat(price),
+      service: service || 'whatsapp',
+      status: 'available',
+      twilioSid: twilioSid || null
+    });
+    
+    await newNumber.save();
+    res.json(newNumber);
+  } catch (error) {
+    console.error('Erro ao adicionar número:', error);
+    res.status(500).json({ message: 'Erro ao adicionar número' });
+  }
+});
 
-  res.json({
-    totalUsers: users.length,
-    totalNumbers: numbers.length,
-    activeOrders: orders.filter(o => o.status === 'active').length,
-    totalRevenue
-  });
+app.post('/api/admin/send-code/:orderId', [auth, adminAuth], async (req, res) => {
+  try {
+    const { code, message } = req.body;
+    const order = await Order.findById(req.params.orderId);
+    
+    if (!order) {
+      return res.status(404).json({ message: 'Pedido não encontrado' });
+    }
+
+    order.verificationCode = code;
+    order.messages.push({ text: message, receivedAt: new Date() });
+    order.status = 'completed';
+    await order.save();
+
+    res.json({ message: 'Código enviado com sucesso' });
+  } catch (error) {
+    console.error('Erro ao enviar código:', error);
+    res.status(500).json({ message: 'Erro ao enviar código' });
+  }
+});
+
+app.get('/api/admin/stats', [auth, adminAuth], async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const totalNumbers = await PhoneNumber.countDocuments();
+    const activeOrders = await Order.countDocuments({ status: 'active' });
+    
+    const completedOrders = await Order.find({ status: 'completed' });
+    const totalRevenue = completedOrders.reduce((sum, o) => sum + o.price, 0);
+
+    res.json({
+      totalUsers,
+      totalNumbers,
+      activeOrders,
+      totalRevenue
+    });
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas:', error);
+    res.status(500).json({ message: 'Erro ao buscar estatísticas' });
+  }
 });
 
 // ============= ROTAS TWILIO =============
@@ -260,8 +357,7 @@ app.post('/api/twilio/buy-number', [auth, adminAuth], async (req, res) => {
     
     const purchased = await twilioService.buyNumber(phoneNumber, webhookUrl);
     
-    const newNumber = {
-      id: String(numbers.length + 1),
+    const newNumber = new PhoneNumber({
       number: phoneNumber,
       country: country || 'Brasil',
       countryCode: countryCode || '55',
@@ -269,11 +365,12 @@ app.post('/api/twilio/buy-number', [auth, adminAuth], async (req, res) => {
       service: 'whatsapp',
       status: 'available',
       twilioSid: purchased.sid
-    };
+    });
     
-    numbers.push(newNumber);
+    await newNumber.save();
     res.json({ message: 'Número comprado com sucesso', number: newNumber });
   } catch (error) {
+    console.error('Erro ao comprar número:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -290,58 +387,82 @@ app.get('/api/twilio/owned-numbers', [auth, adminAuth], async (req, res) => {
 
 // ============= WEBHOOK TWILIO =============
 
-app.post('/api/webhooks/twilio/sms', (req, res) => {
-  const { From, To, Body, MessageSid } = req.body;
-  
-  console.log(`📱 SMS recebido de ${From} para ${To}: ${Body}`);
-  
-  // Encontrar o número no sistema
-  const number = numbers.find(n => n.number === To || n.number === `+${To}`);
-  
-  if (number && number.rentedBy) {
-    // Encontrar pedido ativo
-    const order = orders.find(o => 
-      o.numberId === number.id && 
-      o.status === 'active'
-    );
+app.post('/api/webhooks/twilio/sms', async (req, res) => {
+  try {
+    const { From, To, Body, MessageSid } = req.body;
     
-    if (order) {
-      // Extrair código de verificação (4-6 dígitos)
-      const codeMatch = Body.match(/\b\d{4,6}\b/);
-      
-      if (codeMatch) {
-        order.verificationCode = codeMatch[0];
-        order.status = 'completed';
-        console.log(`✅ Código extraído: ${codeMatch[0]}`);
-      }
-      
-      order.messages.push({ 
-        text: Body, 
-        from: From,
-        receivedAt: new Date(),
-        messageSid: MessageSid
+    console.log(`📱 SMS recebido de ${From} para ${To}: ${Body}`);
+    
+    // Encontrar o número no sistema
+    const number = await PhoneNumber.findOne({ 
+      $or: [
+        { number: To },
+        { number: `+${To}` }
+      ]
+    });
+    
+    if (number && number.currentUser) {
+      // Encontrar pedido ativo
+      const order = await Order.findOne({ 
+        phoneNumber: number._id,
+        status: 'active'
       });
       
-      console.log(`✅ SMS processado para pedido ${order.id}`);
+      if (order) {
+        // Extrair código de verificação (4-6 dígitos)
+        const codeMatch = Body.match(/\b\d{4,6}\b/);
+        
+        if (codeMatch) {
+          order.verificationCode = codeMatch[0];
+          order.status = 'completed';
+          console.log(`✅ Código extraído: ${codeMatch[0]}`);
+        }
+        
+        order.messages.push({ 
+          text: Body, 
+          from: From,
+          receivedAt: new Date(),
+          messageSid: MessageSid
+        });
+        
+        await order.save();
+        console.log(`✅ SMS processado para pedido ${order._id}`);
+      }
     }
+    
+    // Responder ao Twilio
+    res.type('text/xml');
+    res.send('<Response></Response>');
+  } catch (error) {
+    console.error('Erro ao processar webhook:', error);
+    res.type('text/xml');
+    res.send('<Response></Response>');
   }
-  
-  // Responder ao Twilio
-  res.type('text/xml');
-  res.send('<Response></Response>');
 });
 
 // ============= HEALTH CHECK =============
 
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'Servidor funcionando!',
-    twilio: twilioService.isConfigured() ? 'configurado' : 'não configurado',
-    users: users.length,
-    numbers: numbers.length,
-    orders: orders.length
-  });
+app.get('/api/health', async (req, res) => {
+  try {
+    const userCount = await User.countDocuments();
+    const numberCount = await PhoneNumber.countDocuments();
+    const orderCount = await Order.countDocuments();
+    
+    res.json({ 
+      status: 'ok', 
+      message: 'Servidor funcionando!',
+      mongodb: mongoose.connection.readyState === 1 ? 'conectado' : 'desconectado',
+      twilio: twilioService.isConfigured() ? 'configurado' : 'não configurado',
+      users: userCount,
+      numbers: numberCount,
+      orders: orderCount
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: error.message 
+    });
+  }
 });
 
 // ============= INICIAR SERVIDOR =============

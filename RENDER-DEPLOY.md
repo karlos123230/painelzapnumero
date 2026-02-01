@@ -38,13 +38,15 @@ Instance Type: Free
 5. **Environment Variables** (clique em "Add Environment Variable"):
 
 ```
-MONGODB_URI = mongodb+srv://seu_usuario:sua_senha@cluster.mongodb.net/sms-panel
+MONGODB_URI = sua_string_de_conexao_mongodb_atlas
 JWT_SECRET = qualquer_string_secreta_longa_aqui_123456789
-TWILIO_ACCOUNT_SID = seu_twilio_account_sid_aqui
-TWILIO_AUTH_TOKEN = seu_twilio_auth_token_aqui
-WEBHOOK_URL = (deixe vazio por enquanto)
-FRONTEND_URL = (deixe vazio por enquanto)
+TWILIO_ACCOUNT_SID = seu_twilio_account_sid
+TWILIO_AUTH_TOKEN = seu_twilio_auth_token
+WEBHOOK_URL = (deixe vazio por enquanto - será preenchido depois)
+FRONTEND_URL = (deixe vazio por enquanto - será preenchido depois)
 ```
+
+**IMPORTANTE:** Use suas credenciais reais do MongoDB Atlas e Twilio aqui!
 
 6. Clique em **"Create Web Service"**
 7. Aguarde o deploy (5-10 min)
@@ -87,10 +89,32 @@ FRONTEND_URL = https://sms-panel-frontend.onrender.com
 WEBHOOK_URL = https://sms-panel-api.onrender.com
 ```
 
+(Use as URLs reais que você copiou nos passos anteriores)
+
 4. Clique em **"Save Changes"**
 5. O backend vai reiniciar automaticamente
 
-### 5️⃣ Configurar Twilio (Opcional - Para SMS Real)
+### 5️⃣ Testar o Backend
+
+Antes de continuar, teste se o backend está funcionando:
+
+1. Abra no navegador: `https://sms-panel-api.onrender.com/api/health`
+2. Você deve ver algo como:
+```json
+{
+  "status": "ok",
+  "message": "Servidor funcionando!",
+  "mongodb": "conectado",
+  "twilio": "configurado",
+  "users": 0,
+  "numbers": 0,
+  "orders": 0
+}
+```
+
+Se aparecer erro, verifique os logs do backend no Render Dashboard.
+
+### 6️⃣ Configurar Twilio (Opcional - Para SMS Real)
 
 1. Acesse: https://console.twilio.com/us1/develop/phone-numbers/manage/incoming
 2. Para cada número comprado:
@@ -102,7 +126,7 @@ WEBHOOK_URL = https://sms-panel-api.onrender.com
    - Método: **POST**
    - Salve
 
-### 6️⃣ Testar!
+### 7️⃣ Testar!
 
 1. Acesse: `https://sms-panel-frontend.onrender.com`
 2. Registre uma conta
